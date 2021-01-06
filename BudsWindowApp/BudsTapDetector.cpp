@@ -309,6 +309,7 @@ DWORD WINAPI ListenForTaps(_In_ LPVOID BthAddress)
             __try
             {
                 UINT findCount = 0;
+                ZeroMemory(&SockAddrBthServer.serviceClassId, sizeof(SockAddrBthServer.serviceClassId));
                 for (; findCount < g_RemoteBthAddrCount; findCount++)
                 {
                     if (0 == memcmp(&g_RemoteBthAddr[findCount], &SockAddrBthServer, sizeof(g_RemoteBthAddr[findCount])))
