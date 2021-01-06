@@ -80,7 +80,7 @@ namespace SurfaceBudsTripleTap
         private void StartListener()
         {
             var requestedProperties = new string[] { "System.Devices.Aep.DeviceAddress", "System.Devices.Aep.IsConnected" };
-            deviceWatcher = DeviceInformation.CreateWatcher("(System.Devices.Aep.ProtocolId:=\"{e0cbf06c-cd8b-4647-bb8a-263b43f0f974}\" AND System.ItemNameDisplay:~<\"Surface Earbuds\")", requestedProperties, DeviceInformationKind.AssociationEndpoint); // ClassGuid = {e0cbf06c-cd8b-4647-bb8a-263b43f0f974} includes all Bluetooth devices
+            deviceWatcher = DeviceInformation.CreateWatcher("(System.Devices.Aep.ProtocolId:=\"{e0cbf06c-cd8b-4647-bb8a-263b43f0f974}\")", requestedProperties, DeviceInformationKind.AssociationEndpoint); // ClassGuid = {e0cbf06c-cd8b-4647-bb8a-263b43f0f974} includes all Bluetooth devices //  AND System.ItemNameDisplay:~<\"Surface Earbuds\"
             deviceWatcher.Added += DeviceWatcher_Added;
             deviceWatcher.Updated += DeviceWatcher_Updated;
             deviceWatcher.Removed += DeviceWatcher_Removed;

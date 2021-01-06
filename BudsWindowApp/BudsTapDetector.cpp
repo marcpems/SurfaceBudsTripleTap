@@ -10,28 +10,29 @@
 #include <intsafe.h>
 #include "BudsTapDetector.h"
 
-// Bluetooth device class
-// {B62C4E8D-62CC-404b-BBBF-BF3E3BBB1374}
-// DEFINE_GUID(g_guidServiceClass, 0xb62c4e8d, 0x62cc, 0x404b, 0xbb, 0xbf, 0xbf, 0x3e, 0x3b, 0xbb, 0x13, 0x74);
-
+// Bluetooth service RfComm
 // {9B26D8C0-A8ED-440B-95B0-C4714A518BCC}
 DEFINE_GUID(g_guidServiceClass, 0x9B26D8C0, 0xA8ED, 0x440B, 0x95, 0xB0, 0xC4, 0x71, 0x4A, 0x51, 0x8B, 0xCC);
 
 #define CXN_BDADDR_STR_LEN                17   // 6 two-digit hex values plus 5 colons
 #define CXN_MAX_INQUIRY_RETRY             3
-#define CXN_DELAY_NEXT_INQUIRY            15
+#define CXN_DELAY_NEXT_INQUIRY            2
 #define CXN_SUCCESS                       0
 #define CXN_ERROR                         1
 #define CXN_DEFAULT_LISTEN_BACKLOG        4
+#define WAIT_LIMIT                        100000
 
 // defines the maximum number of concurrent listening activities.
 #define MAX_LISTEN_THREADS                4
 LONG * g_iListeningThreads = NULL;
+SOCKADDR_BTH g_RemoteBthAddr [MAX_LISTEN_THREADS] = { 0 };
+unsigned int g_RemoteBthAddrCount = 0;
+HANDLE g_mutex = NULL;
 
 int  g_ulMaxCxnCycles = 1;
 
-ULONG NameToBthAddr(_In_ LPCWSTR pszRemoteName, _Out_ PSOCKADDR_BTH pRemoteBthAddr);
-ULONG RunClientMode(_In_ SOCKADDR_BTH ululRemoteBthAddr, _In_ int iMaxCxnCycles = 1);
+UINT NameToBthAddr();
+ULONG RunClientMode(_In_ UINT index, _In_ int iMaxCxnCycles = 1);
 DWORD WINAPI StartListenThread(LPVOID lpParam);
 
 
@@ -40,6 +41,8 @@ bool init()
     bool bret = false;
     ULONG       ulRetCode = CXN_SUCCESS;
     WSADATA     WSAData = { 0 };
+
+    g_mutex = CreateMutex(NULL, false, NULL);
 
     g_iListeningThreads = (LONG *)_aligned_malloc(sizeof(LONG), 32);
     if (g_iListeningThreads)
@@ -71,7 +74,7 @@ DWORD WINAPI StartListenThread(LPVOID lpParam)
     __try
     {
         // check we are permitted to run
-        if (threadCount < MAX_LISTEN_THREADS)
+        if (threadCount == 1) // MAX_LISTEN_THREADS)
         {
             ULONG       ulRetCode = CXN_SUCCESS;
             SOCKADDR_BTH RemoteBthAddr = { 0 };
@@ -80,11 +83,11 @@ DWORD WINAPI StartListenThread(LPVOID lpParam)
             // Get address from the name of the remote device and run the application
             // in client mode
             //
-            ulRetCode = NameToBthAddr((LPCWSTR)L"Surface Earbuds", &RemoteBthAddr);
-            if (CXN_SUCCESS == ulRetCode)
+            auto index = NameToBthAddr();
+            if (index != -1)
             {
                 // Is the device connected??
-                ulRetCode = RunClientMode(RemoteBthAddr, g_ulMaxCxnCycles);
+                ulRetCode = RunClientMode(index, g_ulMaxCxnCycles);
             }
         }
     }
@@ -101,15 +104,14 @@ DWORD WINAPI StartListenThread(LPVOID lpParam)
 // if required by performing inquiry with remote name requests.
 // This function demonstrates device inquiry, with optional LUP flags.
 //
-ULONG NameToBthAddr(_In_ LPCWSTR pszRemoteName, _Out_ PSOCKADDR_BTH pRemoteBtAddr)
+UINT NameToBthAddr()
 {
     INT             iResult = CXN_SUCCESS;
+    UINT            uiIndex = -1;
     BOOL            bContinueLookup = FALSE, bRemoteDeviceFound = FALSE;
     ULONG           ulFlags = 0, ulPQSSize = sizeof(WSAQUERYSET);
     HANDLE          hLookup = NULL;
     PWSAQUERYSET    pWSAQuerySet = NULL;
-
-    ZeroMemory(pRemoteBtAddr, sizeof(*pRemoteBtAddr));
 
     pWSAQuerySet = (PWSAQUERYSET)new byte[ulPQSSize];
 
@@ -175,17 +177,37 @@ ULONG NameToBthAddr(_In_ LPCWSTR pszRemoteName, _Out_ PSOCKADDR_BTH pRemoteBtAdd
                 // Get information about next bluetooth device
                 if (NO_ERROR == WSALookupServiceNext(hLookup, ulFlags, &ulPQSSize, pWSAQuerySet))
                 {
-                    // Compare the name to see if this is the device we are looking for.
-                    if ((pWSAQuerySet->lpszServiceInstanceName != NULL) &&
-                        (CXN_SUCCESS == _wcsicmp(pWSAQuerySet->lpszServiceInstanceName, pszRemoteName)))
+                    if (WAIT_OBJECT_0 == WaitForSingleObject(g_mutex, WAIT_LIMIT))
                     {
-                        // Found a remote bluetooth device with matching name.
-                        // Get the address of the device and exit the lookup.
-                        CopyMemory(pRemoteBtAddr,
-                            (PSOCKADDR_BTH)pWSAQuerySet->lpcsaBuffer->RemoteAddr.lpSockaddr,
-                            sizeof(*pRemoteBtAddr));
-                        bRemoteDeviceFound = TRUE;
-                        bContinueLookup = FALSE;
+                        __try
+                        {
+                            // Check if the address exist in the list already
+                            UINT count = 0;
+                            for (; count < g_RemoteBthAddrCount; count++)
+                            {
+                                if (0 == memcmp(&g_RemoteBthAddr[count], pWSAQuerySet->lpcsaBuffer->RemoteAddr.lpSockaddr, sizeof(g_RemoteBthAddr[count])))
+                                {
+                                    // this is not the Bth device we are looking for. 
+                                    break;
+                                }
+                            }
+
+                            if (count == g_RemoteBthAddrCount && g_RemoteBthAddrCount < MAX_LISTEN_THREADS)
+                            {
+                                CopyMemory(&g_RemoteBthAddr[count],
+                                    (PSOCKADDR_BTH)pWSAQuerySet->lpcsaBuffer->RemoteAddr.lpSockaddr,
+                                    sizeof(g_RemoteBthAddr[count]));
+
+                                bRemoteDeviceFound = TRUE;
+                                bContinueLookup = FALSE;
+                                uiIndex = count;
+                                g_RemoteBthAddrCount++;
+                            }
+                        }
+                        __finally
+                        {
+                            ReleaseMutex(g_mutex);
+                        }
                     }
                 }
                 else
@@ -232,19 +254,19 @@ ULONG NameToBthAddr(_In_ LPCWSTR pszRemoteName, _Out_ PSOCKADDR_BTH pRemoteBtAdd
         pWSAQuerySet = NULL;
     }
 
-    return bRemoteDeviceFound ? CXN_SUCCESS : CXN_ERROR;
+    return uiIndex;
 }
 
 //
 // RunClientMode runs the application in client mode.  It opens a socket, connects it to a
 // remote socket, transfer some data over the connection and closes the connection.
 //
-ULONG RunClientMode(_In_ SOCKADDR_BTH RemoteAddr, _In_ int iMaxCxnCycles)
+ULONG RunClientMode(_In_ UINT index, _In_ int iMaxCxnCycles)
 {
     ULONG           ulRetCode = CXN_SUCCESS;
     int             iCxnCount = 0;
     SOCKET          LocalSocket = INVALID_SOCKET;
-    SOCKADDR_BTH    SockAddrBthServer = RemoteAddr;
+    SOCKADDR_BTH    SockAddrBthServer = g_RemoteBthAddr[index];
 
     if (CXN_SUCCESS == ulRetCode)
     {
@@ -272,6 +294,7 @@ ULONG RunClientMode(_In_ SOCKADDR_BTH RemoteAddr, _In_ int iMaxCxnCycles)
                 (struct sockaddr*)&SockAddrBthServer,
                 sizeof(SOCKADDR_BTH)))
             {
+                ulRetCode = WSAGetLastError();
                 ulRetCode = CXN_ERROR;
                 break;
             }
@@ -286,9 +309,11 @@ ULONG RunClientMode(_In_ SOCKADDR_BTH RemoteAddr, _In_ int iMaxCxnCycles)
 
                 // got a triple tap
                 // TODO - in future need to verify the data is correct
-
-                // Launch Spotify!
-                ser = ShellExecute(NULL, NULL, L"spotify:", NULL, NULL, SW_SHOWDEFAULT);
+                if (cont)
+                {
+                    // Launch Spotify!
+                    ser = ShellExecute(NULL, NULL, L"spotify:", NULL, NULL, SW_SHOWDEFAULT);
+                }
             }
 
             //
@@ -308,6 +333,29 @@ ULONG RunClientMode(_In_ SOCKADDR_BTH RemoteAddr, _In_ int iMaxCxnCycles)
     {
         closesocket(LocalSocket);
         LocalSocket = INVALID_SOCKET;
+    }
+
+    if (WAIT_OBJECT_0 == WaitForSingleObject(g_mutex, WAIT_LIMIT))
+    {
+        __try
+        {
+            // remove the socket address from the list
+            if (index + 1 < g_RemoteBthAddrCount)
+            {
+                for (UINT count = index; count + 1 < g_RemoteBthAddrCount; count++)
+                {
+                    CopyMemory(&g_RemoteBthAddr[count],
+                        &g_RemoteBthAddr[count + 1],
+                        sizeof(g_RemoteBthAddr[count]));
+                }
+            }
+
+            g_RemoteBthAddrCount--;
+        }
+        __finally
+        {
+            ReleaseMutex(g_mutex);
+        }
     }
 
     return(ulRetCode);
