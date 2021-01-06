@@ -138,7 +138,7 @@ void ProcessNewDevices(bool flushCache)
             ulFlags |= LUP_FLUSHCACHE;
         }
 
-        queryService.type = SDP_SERVICE_SEARCH_REQUEST;
+        queryService.type = SDP_SERVICE_SEARCH_ATTRIBUTE_REQUEST;
         queryService.serviceHandle = 0;
         queryService.uuids[0].u.uuid128 = g_guidServiceClass;
         queryService.uuids[0].uuidType = SDP_ST_UUID128;
@@ -153,7 +153,7 @@ void ProcessNewDevices(bool flushCache)
         ZeroMemory(pWSAQuerySet, ulPQSSize);
         pWSAQuerySet->dwNameSpace = NS_BTH;
         pWSAQuerySet->dwSize = sizeof(WSAQUERYSET);
-//        pWSAQuerySet->lpServiceClassId = (LPGUID)&g_guidRfCommClass;
+//        pWSAQuerySet->lpServiceClassId = (LPGUID)&g_guidRfCommClass; //0x03
         pWSAQuerySet->lpBlob = &blob;
 
         iResult = WSALookupServiceBegin(pWSAQuerySet, ulFlags, &hLookup);
