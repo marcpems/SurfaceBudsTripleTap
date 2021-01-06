@@ -29,7 +29,6 @@ namespace SurfaceBudsTripleTap
         // how to do this in the background??
 
         private static readonly Guid RfcommLaunchCommandUuid = Guid.Parse("9B26D8C0-A8ED-440B-95B0-C4714A518BCC");
-        private static readonly string SurfaceBudsName = "Surface Earbuds";
 
         private DeviceWatcher deviceWatcher = null;
 
@@ -222,7 +221,7 @@ namespace SurfaceBudsTripleTap
                         Task.Run(async () =>
                         {
                             // open a socket and listen
-                            ConnectedSocket = new StreamSocket();
+                              ConnectedSocket = new StreamSocket();
 
                             ConnectedSocket.EnableTransferOwnership(MainPage.BkTask.TaskId, SocketActivityConnectedStandbyAction.Wake);
                             await ConnectedSocket.ConnectAsync(oneTouchService.ConnectionHostName, oneTouchService.ConnectionServiceName);

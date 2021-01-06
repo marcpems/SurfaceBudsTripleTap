@@ -35,8 +35,6 @@ VOID WINAPI SvcMain(DWORD, LPTSTR*);
 
 VOID ReportSvcStatus(DWORD, DWORD, DWORD);
 VOID SvcInit(DWORD, LPTSTR*);
-VOID SvcReportEvent(LPTSTR);
-
 
 int __cdecl _tmain(int argc, TCHAR* argv[])
 {
@@ -46,19 +44,14 @@ int __cdecl _tmain(int argc, TCHAR* argv[])
         return -1;
     }
 
-    DEV_BROADCAST_DEVICEINTERFACE hdr{ 0 };
-    hdr.dbcc_size = sizeof(hdr);
-    hdr.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
-    hdr.dbcc_classguid = g_guidBtthClass;
-
     if (lstrcmpi(argv[1], TEXT("update")) == 0)
     {
         SvcStop();
-        Sleep(2000);
+        Sleep(1000);
         SvcUninstall();
-        Sleep(2000);
+        Sleep(1000);
         SvcInstall();
-        Sleep(2000);
+        Sleep(1000);
         SvcStart();
         return 0;
     }
@@ -90,12 +83,7 @@ int __cdecl _tmain(int argc, TCHAR* argv[])
 
     // This call returns when the service has stopped. 
     // The process should simply terminate when the call returns.
-
-    if (!StartServiceCtrlDispatcher(DispatchTable))
-    {
-        SvcReportEvent((LPTSTR)L"StartServiceCtrlDispatcher");
-    }
-
+    StartServiceCtrlDispatcher(DispatchTable);
     return 0;
  }
 
@@ -141,7 +129,6 @@ VOID SvcInstall()
         SVCNAME,                   // name of service 
         SVCNAME,                   // service name to display 
         SERVICE_ALL_ACCESS,        // TODO: reduce this access !! SERVICE_ALL_ACCESS
-//        SERVICE_WIN32_OWN_PROCESS, // service type 
         SERVICE_USER_OWN_PROCESS, // service type 
         SERVICE_AUTO_START,        // start type 
         SERVICE_ERROR_NORMAL,      // error control type 
@@ -340,12 +327,10 @@ VOID WINAPI SvcMain(DWORD dwArgc, LPTSTR* lpszArgv)
 
     if (!gSvcStatusHandle)
     {
-        SvcReportEvent((LPTSTR)_T("RegisterServiceCtrlHandler"));
         return;
     }
 
     // These SERVICE_STATUS members remain as set here
-//    gSvcStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
     gSvcStatus.dwServiceType = SERVICE_USER_OWN_PROCESS;
     gSvcStatus.dwServiceSpecificExitCode = 0;
 
@@ -366,7 +351,6 @@ VOID WINAPI SvcMain(DWORD dwArgc, LPTSTR* lpszArgv)
         ReportSvcStatus(SERVICE_STOPPED, GetLastError(), 0);
         return;
     }
-
 
     SvcInit(dwArgc, lpszArgv);
 }
@@ -405,20 +389,11 @@ VOID SvcInit(DWORD dwArgc, LPTSTR* lpszArgv)
     init();
 
     // Report running status when initialization is complete.
-
     ReportSvcStatus(SERVICE_RUNNING, NO_ERROR, 0);
 
-    // TO_DO: Perform work until service stops.
-
-    while (1)
-    {
-        // Check whether to stop the service.
-
-        WaitForSingleObject(ghSvcStopEvent, INFINITE);
-
-        ReportSvcStatus(SERVICE_STOPPED, NO_ERROR, 0);
-        return;
-    }
+    // Check whether to stop the service.
+    WaitForSingleObject(ghSvcStopEvent, INFINITE);
+    ReportSvcStatus(SERVICE_STOPPED, NO_ERROR, 0);
 }
 
 //
@@ -505,20 +480,20 @@ DWORD WINAPI SvcCtrlHandler(DWORD dwCtrl, DWORD dwEventType, LPVOID lpEventData,
 
     case SERVICE_CONTROL_DEVICEEVENT:
     {
+        res = NO_ERROR;
+
         switch (dwEventType)
         {
-        case DBT_DEVICEARRIVAL:
-        {
-            DEV_BROADCAST_DEVICEINTERFACE* hdr = (DEV_BROADCAST_DEVICEINTERFACE*)lpEventData;
-            // Devices change - go check for Bth devices
-            findandlisten();
-            res = NO_ERROR;
-        }
-            break;
+            case DBT_DEVICEARRIVAL:
+                {
+                    DEV_BROADCAST_DEVICEINTERFACE* hdr = (DEV_BROADCAST_DEVICEINTERFACE*)lpEventData;
+                    // Devices change - go check for Bth devices
+                    findandlisten();
+                }
+                break;
 
-        default:
-            res = NO_ERROR;// ERROR_CALL_NOT_IMPLEMENTED;
-            break;
+            default:
+                break;
         }
     }
     break;
@@ -529,46 +504,4 @@ DWORD WINAPI SvcCtrlHandler(DWORD dwCtrl, DWORD dwEventType, LPVOID lpEventData,
     }
 
     return res;
-}
-
-//
-// Purpose: 
-//   Logs messages to the event log
-//
-// Parameters:
-//   szFunction - name of function that failed
-// 
-// Return value:
-//   None
-//
-// Remarks:
-//   The service must have an entry in the Application event log.
-//
-VOID SvcReportEvent(LPTSTR szFunction)
-{
-    HANDLE hEventSource;
-    LPCTSTR lpszStrings[2];
-    TCHAR Buffer[80];
-
-    hEventSource = RegisterEventSource(NULL, SVCNAME);
-
-    if (NULL != hEventSource)
-    {
-        StringCchPrintf(Buffer, 80, TEXT("%s failed with %d"), szFunction, GetLastError());
-
-        lpszStrings[0] = SVCNAME;
-        lpszStrings[1] = Buffer;
-
-        ReportEvent(hEventSource,        // event log handle
-            EVENTLOG_ERROR_TYPE, // event type
-            0,                   // event category
-            SVC_ERROR,           // event identifier
-            NULL,                // no security identifier
-            2,                   // size of lpszStrings array
-            0,                   // no binary data
-            lpszStrings,         // array of strings
-            NULL);               // no binary data
-
-        DeregisterEventSource(hEventSource);
-    }
 }
