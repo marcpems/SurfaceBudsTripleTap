@@ -13,6 +13,7 @@
 // Bluetooth service RfComm
 // {9B26D8C0-A8ED-440B-95B0-C4714A518BCC}
 DEFINE_GUID(g_guidServiceClass, 0x9B26D8C0, 0xA8ED, 0x440B, 0x95, 0xB0, 0xC4, 0x71, 0x4A, 0x51, 0x8B, 0xCC);
+DEFINE_GUID(g_guidRfCommClass, 0xe0cbf06c, 0xcd8b, 0x4647, 0xbb, 0x8a, 0x26, 0x3b, 0x43, 0xf0, 0xf9, 0x74);
 
 #define CXN_BDADDR_STR_LEN                17   // 6 two-digit hex values plus 5 colons
 #define CXN_MAX_INQUIRY_RETRY             3
@@ -109,6 +110,8 @@ void ProcessNewDevices(bool flushCache)
     ULONG           ulFlags = 0, ulPQSSize = sizeof(WSAQUERYSET);
     HANDLE          hLookup = NULL;
     PWSAQUERYSET    pWSAQuerySet = NULL;
+    BTH_QUERY_SERVICE queryService{ 0 };
+    BLOB            blob{ 0 };
 
     pWSAQuerySet = (PWSAQUERYSET)new byte[ulPQSSize];
 
@@ -135,6 +138,14 @@ void ProcessNewDevices(bool flushCache)
             ulFlags |= LUP_FLUSHCACHE;
         }
 
+        queryService.type = SDP_SERVICE_SEARCH_REQUEST;
+        queryService.serviceHandle = 0;
+        queryService.uuids[0].u.uuid128 = g_guidServiceClass;
+        queryService.uuids[0].uuidType = SDP_ST_UUID128;
+
+        blob.cbSize = sizeof(queryService);
+        blob.pBlobData = (BYTE*)&queryService;
+
         // Start the lookup service
         iResult = CXN_SUCCESS;
         hLookup = 0;
@@ -142,7 +153,12 @@ void ProcessNewDevices(bool flushCache)
         ZeroMemory(pWSAQuerySet, ulPQSSize);
         pWSAQuerySet->dwNameSpace = NS_BTH;
         pWSAQuerySet->dwSize = sizeof(WSAQUERYSET);
+//        pWSAQuerySet->lpServiceClassId = (LPGUID)&g_guidRfCommClass;
+        pWSAQuerySet->lpBlob = &blob;
+
         iResult = WSALookupServiceBegin(pWSAQuerySet, ulFlags, &hLookup);
+
+        iResult = WSAGetLastError();
 
         // drop through on error
         if ((NO_ERROR == iResult) && (NULL != hLookup))
