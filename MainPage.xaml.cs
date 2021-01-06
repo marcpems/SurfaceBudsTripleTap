@@ -141,56 +141,53 @@ namespace SurfaceBudsTripleTap
                 mre.WaitOne();
 
                 // Find the Surface Buds
-                if (args.Name != null && args.Name == SurfaceBudsName)
+                // check the device isnt already in the list.
+                foreach (var device in deviceList)
                 {
-                    // check the device isnt already in the list.
-                    foreach (var device in deviceList)
+                    if (device.DeviceId == args.Id)
                     {
-                        if (device.DeviceId == args.Id)
-                        {
-                            // done - drop right out.
-                            return;
-                        }
+                        // done - drop right out.
+                        return;
                     }
+                }
 
-                    // check it's what we are after
-                    DeviceAccessStatus accessStatus = DeviceAccessInformation.CreateFromId(args.Id).CurrentStatus;
-                    if (accessStatus != DeviceAccessStatus.DeniedByUser &&
-                        accessStatus != DeviceAccessStatus.DeniedBySystem)
-                    {
-                            var bluetoothDevice = await BluetoothDevice.FromIdAsync(args.Id);
+                // check it's what we are after
+                DeviceAccessStatus accessStatus = DeviceAccessInformation.CreateFromId(args.Id).CurrentStatus;
+                if (accessStatus != DeviceAccessStatus.DeniedByUser &&
+                    accessStatus != DeviceAccessStatus.DeniedBySystem)
+                {
+                        var bluetoothDevice = await BluetoothDevice.FromIdAsync(args.Id);
 
-                            if (bluetoothDevice != null)
+                        if (bluetoothDevice != null)
+                        {
+                            // add it to the list.
+                            var result = await bluetoothDevice.GetRfcommServicesForIdAsync(RfcommServiceId.FromUuid(RfcommLaunchCommandUuid));
+                        if (result.Services.Count > 0)
+                        {
+                            var newDevice = new BudsDeviceInfo();
+                            newDevice.DeviceId = args.Id;
+                            newDevice.oneTouchService = result.Services[0];
+
+                            // now check to see if the device is connected
+                            foreach (var prop in args.Properties)
                             {
-                                // add it to the list.
-                                var result = await bluetoothDevice.GetRfcommServicesForIdAsync(RfcommServiceId.FromUuid(RfcommLaunchCommandUuid));
-                            if (result.Services.Count > 0)
-                            {
-                                var newDevice = new BudsDeviceInfo();
-                                newDevice.DeviceId = args.Id;
-                                newDevice.oneTouchService = result.Services[0];
-
-                                // now check to see if the device is connected
-                                foreach (var prop in args.Properties)
+                                if (prop.Key == "System.Devices.Aep.IsConnected" && prop.Value.GetType() == typeof(bool) && (bool)prop.Value == true)
                                 {
-                                    if (prop.Key == "System.Devices.Aep.IsConnected" && prop.Value.GetType() == typeof(bool) && (bool)prop.Value == true)
-                                    {
-                                        newDevice.IsConnected = true;
-                                    }
+                                    newDevice.IsConnected = true;
                                 }
-                                deviceList.Add(newDevice);
-
-                                var countConnected = 0;
-                                foreach (var device in deviceList)
-                                {
-                                    if (device.IsConnected)
-                                    {
-                                        countConnected++;
-                                    }
-                                }
-
-                                UpdateStatusMessage(string.Format("Found {0} device(s). Connected: {1}", deviceList.Count, countConnected));
                             }
+                            deviceList.Add(newDevice);
+
+                            var countConnected = 0;
+                            foreach (var device in deviceList)
+                            {
+                                if (device.IsConnected)
+                                {
+                                    countConnected++;
+                                }
+                            }
+
+                            UpdateStatusMessage(string.Format("Found {0} device(s). Connected: {1}", deviceList.Count, countConnected));
                         }
                     }
                 }

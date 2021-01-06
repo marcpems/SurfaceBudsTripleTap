@@ -16,14 +16,14 @@ DEFINE_GUID(g_guidServiceClass, 0x9B26D8C0, 0xA8ED, 0x440B, 0x95, 0xB0, 0xC4, 0x
 
 #define CXN_BDADDR_STR_LEN                17   // 6 two-digit hex values plus 5 colons
 #define CXN_MAX_INQUIRY_RETRY             3
-#define CXN_DELAY_NEXT_INQUIRY            2
+#define CXN_DELAY_NEXT_INQUIRY            500
 #define CXN_SUCCESS                       0
 #define CXN_ERROR                         1
 #define CXN_DEFAULT_LISTEN_BACKLOG        4
 #define WAIT_LIMIT                        100000
 
 // defines the maximum number of concurrent listening activities.
-#define MAX_LISTEN_THREADS                4
+#define MAX_LISTEN_THREADS                40
 LONG * g_iListeningThreads = NULL;
 SOCKADDR_BTH g_RemoteBthAddr [MAX_LISTEN_THREADS] = { 0 };
 unsigned int g_RemoteBthAddrCount = 0;
@@ -31,10 +31,9 @@ HANDLE g_mutex = NULL;
 
 int  g_ulMaxCxnCycles = 1;
 
-UINT NameToBthAddr();
-ULONG RunClientMode(_In_ UINT index, _In_ int iMaxCxnCycles = 1);
+void ProcessNewDevices(bool flush);
+DWORD WINAPI ListenForTaps(_In_ LPVOID BthAddress);
 DWORD WINAPI StartListenThread(LPVOID lpParam);
-
 
 bool init()
 {
@@ -61,6 +60,7 @@ bool init()
     return bret;
 }
 
+// Kick off the process of finding any new devices
 void findandlisten()
 {
     // start a new thread to look for a device and listen for taps
@@ -71,44 +71,41 @@ DWORD WINAPI StartListenThread(LPVOID lpParam)
 {
     auto threadCount = InterlockedIncrement(g_iListeningThreads);
 
-    __try
+    // only actually allow one thread to do this at a time
+    if (threadCount == 1)
     {
-        // check we are permitted to run
-        if (threadCount == 1) // MAX_LISTEN_THREADS)
-        {
-            ULONG       ulRetCode = CXN_SUCCESS;
-            SOCKADDR_BTH RemoteBthAddr = { 0 };
+        bool flush = false;
 
-            //
-            // Get address from the name of the remote device and run the application
-            // in client mode
-            //
-            auto index = NameToBthAddr();
-            if (index != -1)
+        while (threadCount)
+        {
+            __try
             {
-                // Is the device connected??
-                ulRetCode = RunClientMode(index, g_ulMaxCxnCycles);
+                ProcessNewDevices(flush);
+            }
+            __finally
+            {
+                threadCount = InterlockedDecrement(g_iListeningThreads);
+            }
+
+            if (threadCount)
+            {
+                // Pause for some time before retrying 
+                Sleep(CXN_DELAY_NEXT_INQUIRY);
+                flush = true;
             }
         }
-    }
-    __finally
-    {
-        InterlockedDecrement(g_iListeningThreads);
     }
 
     return 0;
 }
 
-//
-// NameToBthAddr converts a bluetooth device name to a bluetooth address,
-// if required by performing inquiry with remote name requests.
-// This function demonstrates device inquiry, with optional LUP flags.
-//
-UINT NameToBthAddr()
+// ProcessNewDevices reads through the list of Bluetooth devices and 
+// attempts to setup a listening socket for each RfComm bluetooth address,
+void ProcessNewDevices(bool flushCache)
 {
     INT             iResult = CXN_SUCCESS;
     UINT            uiIndex = -1;
-    BOOL            bContinueLookup = FALSE, bRemoteDeviceFound = FALSE;
+    BOOL            bContinueLookup = FALSE;
     ULONG           ulFlags = 0, ulPQSSize = sizeof(WSAQUERYSET);
     HANDLE          hLookup = NULL;
     PWSAQUERYSET    pWSAQuerySet = NULL;
@@ -120,132 +117,109 @@ UINT NameToBthAddr()
         iResult = STATUS_NO_MEMORY;
     }
 
-    // Search for the device with the correct name
+    // Search the devices 
     if (CXN_SUCCESS == iResult)
     {
-        for (INT iRetryCount = 0;
-            !bRemoteDeviceFound && (iRetryCount < CXN_MAX_INQUIRY_RETRY);
-            iRetryCount++)
+        // WSALookupService is used for both service search and device inquiry
+        // LUP_CONTAINERS is the flag which signals that we're doing a device inquiry.
+        ulFlags = LUP_CONTAINERS;
+
+        // BTH_ADDR will be returned in lpcsaBuffer member of WSAQUERYSET
+        ulFlags |= LUP_RETURN_ADDR;
+
+        if (flushCache)
         {
-            // WSALookupService is used for both service search and device inquiry
-            // LUP_CONTAINERS is the flag which signals that we're doing a device inquiry.
-            ulFlags = LUP_CONTAINERS;
+            // Flush the device cache for all inquiries, except for the first inquiry
+            // By setting LUP_FLUSHCACHE flag, we're asking the lookup service to do
+            // a fresh lookup instead of pulling the information from device cache.
+            ulFlags |= LUP_FLUSHCACHE;
+        }
 
-            // Friendly device name (if available) will be returned in lpszServiceInstanceName
-            ulFlags |= LUP_RETURN_NAME;
+        // Start the lookup service
+        iResult = CXN_SUCCESS;
+        hLookup = 0;
+        bContinueLookup = FALSE;
+        ZeroMemory(pWSAQuerySet, ulPQSSize);
+        pWSAQuerySet->dwNameSpace = NS_BTH;
+        pWSAQuerySet->dwSize = sizeof(WSAQUERYSET);
+        iResult = WSALookupServiceBegin(pWSAQuerySet, ulFlags, &hLookup);
 
-            // BTH_ADDR will be returned in lpcsaBuffer member of WSAQUERYSET
-            ulFlags |= LUP_RETURN_ADDR;
+        // drop through on error
+        if ((NO_ERROR == iResult) && (NULL != hLookup))
+        {
+            bContinueLookup = TRUE;
+        }
 
-            if (iRetryCount)
+        while (bContinueLookup)
+        {
+            // Get information about next bluetooth device
+            if (NO_ERROR == WSALookupServiceNext(hLookup, ulFlags, &ulPQSSize, pWSAQuerySet))
             {
-                // Flush the device cache for all inquiries, except for the first inquiry
-                // By setting LUP_FLUSHCACHE flag, we're asking the lookup service to do
-                // a fresh lookup instead of pulling the information from device cache.
-                ulFlags |= LUP_FLUSHCACHE;
-
-                // Pause for some time before all the inquiries after the first inquiry
-                // Remote Name requests will arrive after device inquiry has
-                // completed.  Without a window to receive IN_RANGE notifications,
-                // we don't have a direct mechanism to determine when remote
-                // name requests have completed.
-                Sleep(CXN_DELAY_NEXT_INQUIRY * 1000);
-            }
-
-            // Start the lookup service
-            iResult = CXN_SUCCESS;
-            hLookup = 0;
-            bContinueLookup = FALSE;
-            ZeroMemory(pWSAQuerySet, ulPQSSize);
-            pWSAQuerySet->dwNameSpace = NS_BTH;
-            pWSAQuerySet->dwSize = sizeof(WSAQUERYSET);
-            iResult = WSALookupServiceBegin(pWSAQuerySet, ulFlags, &hLookup);
-
-            // Even if we have an error, we want to continue until we
-            // reach the CXN_MAX_INQUIRY_RETRY
-            if ((NO_ERROR == iResult) && (NULL != hLookup))
-            {
-                bContinueLookup = TRUE;
-            }
-            else if (0 < iRetryCount)
-            {
-                break;
-            }
-
-            while (bContinueLookup)
-            {
-                // Get information about next bluetooth device
-                if (NO_ERROR == WSALookupServiceNext(hLookup, ulFlags, &ulPQSSize, pWSAQuerySet))
+                // lock the mutex to add a new handler 
+                if (WAIT_OBJECT_0 == WaitForSingleObject(g_mutex, WAIT_LIMIT))
                 {
-                    if (WAIT_OBJECT_0 == WaitForSingleObject(g_mutex, WAIT_LIMIT))
+                    __try
                     {
-                        __try
+                        // Check if the address exist in the list already
+                        UINT count = 0;
+                        for (; count < g_RemoteBthAddrCount; count++)
                         {
-                            // Check if the address exist in the list already
-                            UINT count = 0;
-                            for (; count < g_RemoteBthAddrCount; count++)
+                            if (0 == memcmp(&g_RemoteBthAddr[count], pWSAQuerySet->lpcsaBuffer->RemoteAddr.lpSockaddr, sizeof(g_RemoteBthAddr[count])))
                             {
-                                if (0 == memcmp(&g_RemoteBthAddr[count], pWSAQuerySet->lpcsaBuffer->RemoteAddr.lpSockaddr, sizeof(g_RemoteBthAddr[count])))
-                                {
-                                    // this is not the Bth device we are looking for. 
-                                    break;
-                                }
-                            }
-
-                            if (count == g_RemoteBthAddrCount && g_RemoteBthAddrCount < MAX_LISTEN_THREADS)
-                            {
-                                CopyMemory(&g_RemoteBthAddr[count],
-                                    (PSOCKADDR_BTH)pWSAQuerySet->lpcsaBuffer->RemoteAddr.lpSockaddr,
-                                    sizeof(g_RemoteBthAddr[count]));
-
-                                bRemoteDeviceFound = TRUE;
-                                bContinueLookup = FALSE;
-                                uiIndex = count;
-                                g_RemoteBthAddrCount++;
+                                // already got this one 
+                                break;
                             }
                         }
-                        __finally
+
+                        if (count == g_RemoteBthAddrCount && g_RemoteBthAddrCount < MAX_LISTEN_THREADS)
                         {
-                            ReleaseMutex(g_mutex);
+                            CopyMemory(&g_RemoteBthAddr[count],
+                                (PSOCKADDR_BTH)pWSAQuerySet->lpcsaBuffer->RemoteAddr.lpSockaddr,
+                                sizeof(g_RemoteBthAddr[count]));
+                            g_RemoteBthAddrCount++;
+
+                            // start a socket attempt.
+                            CreateThread(NULL, 0, ListenForTaps, (LPVOID)&g_RemoteBthAddr[count], 0, 0);
                         }
+                    }
+                    __finally
+                    {
+                        ReleaseMutex(g_mutex);
+                    }
+                }
+            }
+            else
+            {
+                iResult = WSAGetLastError();
+                if (WSAEFAULT == iResult)
+                {
+                    // The buffer for QUERYSET was insufficient.
+                    // In such case 3rd parameter "ulPQSSize" of function "WSALookupServiceNext()" receives
+                    // the required size.  So we can use this parameter to reallocate memory for QUERYSET.
+                    delete[] pWSAQuerySet;
+                    pWSAQuerySet = (PWSAQUERYSET)new byte[ulPQSSize];
+                    if (NULL == pWSAQuerySet)
+                    {
+                        iResult = STATUS_NO_MEMORY;
+                        bContinueLookup = FALSE;
                     }
                 }
                 else
                 {
-                    iResult = WSAGetLastError();
+#ifdef _DEBUG
                     if (WSA_E_NO_MORE == iResult)
                     {
                         // No more devices found.  Exit the lookup.
-                        bContinueLookup = FALSE;
+                        // ... log?
                     }
-                    else if (WSAEFAULT == iResult)
-                    {
-                        // The buffer for QUERYSET was insufficient.
-                        // In such case 3rd parameter "ulPQSSize" of function "WSALookupServiceNext()" receives
-                        // the required size.  So we can use this parameter to reallocate memory for QUERYSET.
-                        delete[] pWSAQuerySet;
-                        pWSAQuerySet = (PWSAQUERYSET)new byte[ulPQSSize];
-                        if (NULL == pWSAQuerySet)
-                        {
-                            iResult = STATUS_NO_MEMORY;
-                            bContinueLookup = FALSE;
-                        }
-                    }
-                    else
-                    {
-                        bContinueLookup = FALSE;
-                    }
+#endif
+                    bContinueLookup = FALSE;
                 }
             }
-
-            // End the lookup service
-            WSALookupServiceEnd(hLookup);
-
-            if (STATUS_NO_MEMORY == iResult)
-            {
-                break;
-            }
         }
+
+        // End the lookup service
+        WSALookupServiceEnd(hLookup);
     }
 
     if (NULL != pWSAQuerySet)
@@ -253,110 +227,95 @@ UINT NameToBthAddr()
         delete[] pWSAQuerySet;
         pWSAQuerySet = NULL;
     }
-
-    return uiIndex;
 }
 
 //
-// RunClientMode runs the application in client mode.  It opens a socket, connects it to a
-// remote socket, transfer some data over the connection and closes the connection.
+// ListenForTaps takes the address and tries to open a socket, connect to it
+// and wait for a tap command. On error the connection is closed and the address removed from the list.
 //
-ULONG RunClientMode(_In_ UINT index, _In_ int iMaxCxnCycles)
+DWORD WINAPI ListenForTaps(_In_ LPVOID BthAddress)
 {
-    ULONG           ulRetCode = CXN_SUCCESS;
-    int             iCxnCount = 0;
-    SOCKET          LocalSocket = INVALID_SOCKET;
-    SOCKADDR_BTH    SockAddrBthServer = g_RemoteBthAddr[index];
+    SOCKADDR_BTH    SockAddrBthServer = *(SOCKADDR_BTH*)BthAddress;
 
-    if (CXN_SUCCESS == ulRetCode)
+    __try
     {
+        SOCKET          LocalSocket = INVALID_SOCKET;
+
         // Setting address family to AF_BTH indicates winsock2 to use Bluetooth sockets
         // Port should be set to 0 if ServiceClassId is spesified.
         SockAddrBthServer.addressFamily = AF_BTH;
         SockAddrBthServer.serviceClassId = g_guidServiceClass;
         SockAddrBthServer.port = 0;
 
-        // Run the connection/data-transfer for user specified number of cycles
-        for (iCxnCount = 0;
-            (0 == ulRetCode) && (iCxnCount < iMaxCxnCycles || iMaxCxnCycles == 0);
-            iCxnCount++)
+        // Open a bluetooth socket using RFCOMM protocol
+        LocalSocket = socket(AF_BTH, SOCK_STREAM, BTHPROTO_RFCOMM);
+        if (INVALID_SOCKET != LocalSocket)
         {
-            // Open a bluetooth socket using RFCOMM protocol
-            LocalSocket = socket(AF_BTH, SOCK_STREAM, BTHPROTO_RFCOMM);
-            if (INVALID_SOCKET == LocalSocket)
-            {
-                ulRetCode = CXN_ERROR;
-                break;
-            }
-
             // Connect the socket (pSocket) to a given remote socket represented by address (pServerAddr)
-            if (SOCKET_ERROR == connect(LocalSocket,
+            if (SOCKET_ERROR != connect(LocalSocket,
                 (struct sockaddr*)&SockAddrBthServer,
                 sizeof(SOCKADDR_BTH)))
             {
-                ulRetCode = WSAGetLastError();
-                ulRetCode = CXN_ERROR;
-                break;
-            }
-
-            char* buf = new char[12]{ 0 };
-            bool cont = true;
-            HINSTANCE ser = 0;
-            while (cont)
-            {
-                auto result = recv(LocalSocket, buf, 12, MSG_WAITALL);
-                cont = result == 12;
-
-                // got a triple tap
-                // TODO - in future need to verify the data is correct
-                if (cont)
+                char* buf = new char[12]{ 0 };
+                bool cont = true;
+                HINSTANCE ser = 0;
+                while (cont)
                 {
-                    // Launch Spotify!
-                    ser = ShellExecute(NULL, NULL, L"spotify:", NULL, NULL, SW_SHOWDEFAULT);
+                    auto result = recv(LocalSocket, buf, 12, MSG_WAITALL);
+                    cont = result == 12;
+
+                    // got a triple tap
+                    // TODO - in future need to verify the data is correct
+                    if (cont)
+                    {
+                        // Launch Spotify!
+                        ser = ShellExecute(NULL, NULL, L"spotify:", NULL, NULL, SW_SHOWDEFAULT);
+                    }
                 }
             }
-
-            //
-            // Close the socket
-            //
-            if (SOCKET_ERROR == closesocket(LocalSocket))
+#ifdef _DEBUG
+            else
             {
-                ulRetCode = CXN_ERROR;
-                break;
+                // get the socket error code (debug only)
+                auto errorCode = WSAGetLastError();
             }
-
-            LocalSocket = INVALID_SOCKET;
+#endif
         }
-    }
 
-    if (INVALID_SOCKET != LocalSocket)
-    {
         closesocket(LocalSocket);
         LocalSocket = INVALID_SOCKET;
     }
-
-    if (WAIT_OBJECT_0 == WaitForSingleObject(g_mutex, WAIT_LIMIT))
+    __finally
     {
-        __try
+        // we must remove the address from the list.
+        if (WAIT_OBJECT_0 == WaitForSingleObject(g_mutex, WAIT_LIMIT))
         {
-            // remove the socket address from the list
-            if (index + 1 < g_RemoteBthAddrCount)
+            __try
             {
-                for (UINT count = index; count + 1 < g_RemoteBthAddrCount; count++)
+                UINT findCount = 0;
+                for (; findCount < g_RemoteBthAddrCount; findCount++)
                 {
-                    CopyMemory(&g_RemoteBthAddr[count],
-                        &g_RemoteBthAddr[count + 1],
-                        sizeof(g_RemoteBthAddr[count]));
+                    if (0 == memcmp(&g_RemoteBthAddr[findCount], &SockAddrBthServer, sizeof(g_RemoteBthAddr[findCount])))
+                    {
+                        // found it! If its in the middle, move everything up
+                        for (UINT count = findCount; count + 1 < g_RemoteBthAddrCount; count++)
+                        {
+                            CopyMemory(&g_RemoteBthAddr[count],
+                                &g_RemoteBthAddr[count + 1],
+                                sizeof(g_RemoteBthAddr[count]));
+                        }
+                        break;
+                    }
                 }
-            }
 
-            g_RemoteBthAddrCount--;
-        }
-        __finally
-        {
-            ReleaseMutex(g_mutex);
+                g_RemoteBthAddrCount--;
+            }
+            __finally
+            {
+                ReleaseMutex(g_mutex);
+            }
         }
     }
 
-    return(ulRetCode);
+    return 0; 
 }
