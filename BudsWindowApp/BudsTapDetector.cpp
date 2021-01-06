@@ -16,12 +16,10 @@ DEFINE_GUID(g_guidServiceClass, 0x9B26D8C0, 0xA8ED, 0x440B, 0x95, 0xB0, 0xC4, 0x
 DEFINE_GUID(g_guidRfCommClass, 0xe0cbf06c, 0xcd8b, 0x4647, 0xbb, 0x8a, 0x26, 0x3b, 0x43, 0xf0, 0xf9, 0x74);
 
 #define CXN_BDADDR_STR_LEN                17   // 6 two-digit hex values plus 5 colons
-#define CXN_MAX_INQUIRY_RETRY             3
 #define CXN_DELAY_NEXT_INQUIRY            500
 #define CXN_SUCCESS                       0
 #define CXN_ERROR                         1
-#define CXN_DEFAULT_LISTEN_BACKLOG        4
-#define WAIT_LIMIT                        100000
+#define WAIT_LIMIT                        1000
 
 // defines the maximum number of concurrent listening activities.
 #define MAX_LISTEN_THREADS                40
@@ -153,54 +151,102 @@ void ProcessNewDevices(bool flushCache)
         ZeroMemory(pWSAQuerySet, ulPQSSize);
         pWSAQuerySet->dwNameSpace = NS_BTH;
         pWSAQuerySet->dwSize = sizeof(WSAQUERYSET);
-//        pWSAQuerySet->lpServiceClassId = (LPGUID)&g_guidRfCommClass; //0x03
         pWSAQuerySet->lpBlob = &blob;
 
         iResult = WSALookupServiceBegin(pWSAQuerySet, ulFlags, &hLookup);
-
-        iResult = WSAGetLastError();
 
         // drop through on error
         if ((NO_ERROR == iResult) && (NULL != hLookup))
         {
             bContinueLookup = TRUE;
         }
+#ifdef _DEBUG
+        else
+        {
+            iResult = WSAGetLastError();
+        }
+#endif
 
         while (bContinueLookup)
         {
             // Get information about next bluetooth device
             if (NO_ERROR == WSALookupServiceNext(hLookup, ulFlags, &ulPQSSize, pWSAQuerySet))
             {
-                // lock the mutex to add a new handler 
-                if (WAIT_OBJECT_0 == WaitForSingleObject(g_mutex, WAIT_LIMIT))
+                // Now go 
+                WSAQUERYSET    wSAQuerySet2{ 0 };
+                wSAQuerySet2.dwSize = sizeof(wSAQuerySet2);
+                GUID protocol = RFCOMM_PROTOCOL_UUID;
+                wSAQuerySet2.lpServiceClassId = (LPGUID)&protocol;
+                wSAQuerySet2.dwNameSpace = NS_BTH;
+                HANDLE hLookup2 = 0;
+                DWORD addressSize = 2000;
+                TCHAR addressAsString[2000]{ 0 };
+                WSAPROTOCOL_INFO protocolInfo;
+                int protocolInfoSize = sizeof(protocolInfo);
+                DWORD flags = LUP_FLUSHCACHE | LUP_RETURN_NAME ;
+
+                auto s = socket(AF_BTH, SOCK_STREAM, BTHPROTO_RFCOMM);
+                getsockopt(s, SOL_SOCKET, SO_PROTOCOL_INFO, (char*)&protocolInfo, &protocolInfoSize);
+
+                if (WSAAddressToString(
+                    pWSAQuerySet->lpcsaBuffer->RemoteAddr.lpSockaddr,
+                    pWSAQuerySet->lpcsaBuffer->RemoteAddr.iSockaddrLength,
+                    &protocolInfo,
+                    addressAsString,
+                    &addressSize))
                 {
-                    __try
+                    iResult = WSAGetLastError();
+                }
+                iResult = WSAGetLastError();
+
+                wSAQuerySet2.lpszContext = addressAsString;
+
+                auto res = WSALookupServiceBegin(&wSAQuerySet2, flags, &hLookup2);
+                if (NO_ERROR == res)
+                {
+                    //BYTE buffer[2000];
+                    //DWORD bufferLen = sizeof(buffer);
+                    //PWSAQUERYSET pResult = (PWSAQUERYSET)buffer;
+
+                    //while (NO_ERROR == WSALookupServiceNext(hLookup2, flags, &bufferLen, pResult))
+                    //{
+
+                    //}
+
+
+
+                // lock the mutex to add a new handler 
+                    if (WAIT_OBJECT_0 == WaitForSingleObject(g_mutex, WAIT_LIMIT))
                     {
-                        // Check if the address exist in the list already
-                        UINT count = 0;
-                        for (; count < g_RemoteBthAddrCount; count++)
+                        __try
                         {
-                            if (0 == memcmp(&g_RemoteBthAddr[count], pWSAQuerySet->lpcsaBuffer->RemoteAddr.lpSockaddr, sizeof(g_RemoteBthAddr[count])))
+                            // Check if the address exist in the list already
+                            UINT count = 0;
+                            for (; count < g_RemoteBthAddrCount; count++)
                             {
-                                // already got this one 
-                                break;
+                                if (0 == memcmp(&g_RemoteBthAddr[count], pWSAQuerySet->lpcsaBuffer->RemoteAddr.lpSockaddr, sizeof(g_RemoteBthAddr[count])))
+                                {
+                                    // already got this one 
+                                    break;
+                                }
+                            }
+
+                            if (count == g_RemoteBthAddrCount && g_RemoteBthAddrCount < MAX_LISTEN_THREADS)
+                            {
+                                CopyMemory(&g_RemoteBthAddr[count],
+                                    (PSOCKADDR_BTH)pWSAQuerySet->lpcsaBuffer->RemoteAddr.lpSockaddr,
+                                    sizeof(g_RemoteBthAddr[count]));
+                                g_RemoteBthAddrCount++;
+
+                                // start a socket attempt.
+                                CreateThread(NULL, 0, ListenForTaps, (LPVOID)&g_RemoteBthAddr[count], 0, 0);
                             }
                         }
-
-                        if (count == g_RemoteBthAddrCount && g_RemoteBthAddrCount < MAX_LISTEN_THREADS)
+                        __finally
                         {
-                            CopyMemory(&g_RemoteBthAddr[count],
-                                (PSOCKADDR_BTH)pWSAQuerySet->lpcsaBuffer->RemoteAddr.lpSockaddr,
-                                sizeof(g_RemoteBthAddr[count]));
-                            g_RemoteBthAddrCount++;
-
-                            // start a socket attempt.
-                            CreateThread(NULL, 0, ListenForTaps, (LPVOID)&g_RemoteBthAddr[count], 0, 0);
+                            ReleaseMutex(g_mutex);
                         }
-                    }
-                    __finally
-                    {
-                        ReleaseMutex(g_mutex);
+                        WSALookupServiceEnd(hLookup2);
                     }
                 }
             }
